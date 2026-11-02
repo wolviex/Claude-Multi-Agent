@@ -9,7 +9,8 @@ hooks:
     - matcher: "Bash"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-git-write.sh"
+          command: "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-git-write.sh\""
+          onFailure: block
 ---
 
 You are the implementer. The orchestrator gives you a task brief; you carry it out and report back. You do not decide when work is finished; the reviewer and orchestrator do.

@@ -1,10 +1,37 @@
 #!/usr/bin/env bash
-# PreToolUse hook for subagents: blocks git write subcommands, allows read-only git.
+# PreToolUse hook: blocks git write subcommands from subagents, allows read-only git and all main-session calls.
+# Registered in .claude/settings.json (fires for every Bash call) and in each agent's frontmatter; the agent_id/agent_type gate keeps the orchestrator unaffected.
 # Guardrail against accidents, not a security boundary: indirect invocations (e.g. `$g commit`, `xargs git commit`) are not caught.
 # Reads the hook JSON on stdin. Exit 2 blocks the tool call; exit 0 allows it.
 set -u
 
 input="$(cat)"
+
+block() {
+  echo "Blocked: subagents may not run git write commands ($1). Report your changes to the orchestrator instead." >&2
+  exit 2
+}
+
+# Subagent gate: a call is from a subagent when it carries agent_id, or agent_type implementer/reviewer.
+# Anything else is a main-session call and is allowed.
+agent_id=""
+agent_type=""
+if command -v jq >/dev/null 2>&1; then
+  agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+  agent_type="$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)"
+else
+  case "$input" in
+    *'"agent_id"'*) agent_id="unknown" ;;
+  esac
+fi
+if [ -z "$agent_id" ] && [ "$agent_type" != "implementer" ] && [ "$agent_type" != "reviewer" ]; then
+  exit 0
+fi
+
+# Subagent call without jq: fail closed, since the command cannot be parsed.
+if ! command -v jq >/dev/null 2>&1; then
+  block "jq not installed; hook cannot parse the command"
+fi
 
 cmd="$input"
 if command -v jq >/dev/null 2>&1; then
