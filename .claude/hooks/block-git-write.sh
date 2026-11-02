@@ -53,12 +53,20 @@ branch_tag_readonly() {
       --list|-l) has_list=1 ;;
     esac
   done
-  for a in "$@"; do
+  local -a argv=("$@")
+  local n=$# i=0
+  while [ "$i" -lt "$n" ]; do
+    a="${argv[$i]}"
+    case "$a" in
+      # Filter flags that take a value: the next argument is the value, not a branch/tag name.
+      --contains|--no-contains|--merged|--no-merged|--points-at) i=$((i + 2)); continue ;;
+    esac
     case "$a" in
       -d|-D|-m|-M|-c|-C|-f|-u|--delete|--move|--copy|--force|--set-upstream|--set-upstream-to|--set-upstream-to=*|--unset-upstream|--edit-description) return 1 ;;
       -*) ;;
       *) [ "$has_list" -eq 1 ] || return 1 ;;
     esac
+    i=$((i + 1))
   done
   return 0
 }
@@ -135,6 +143,13 @@ check_cmd() {
       case "$first" in
         --get|--get-all|--get-regexp|--list|-l) return 0 ;;
       esac
+      # Single dotted key (section.key) with no flags is a read.
+      if [ "${#args[@]}" -eq 1 ]; then
+        case "$first" in
+          -*|"") ;;
+          *.*) return 0 ;;
+        esac
+      fi
       block config ;;
     reflog)
       # Only expire and delete write; bare reflog and show (or other options) are read-only.
