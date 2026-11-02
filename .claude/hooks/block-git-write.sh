@@ -2,6 +2,9 @@
 # PreToolUse hook: blocks git write subcommands from subagents, allows read-only git and all main-session calls.
 # Registered in .claude/settings.json (fires for every Bash call) and in each agent's frontmatter; the agent_id/agent_type gate keeps the orchestrator unaffected.
 # Guardrail against accidents, not a security boundary: indirect invocations (e.g. `$g commit`, `xargs git commit`) are not caught.
+# Known limitation (not a bug): the command is split into lines and segments and each is scanned alone, so heredoc bodies and multi-line
+# quoted strings are scanned line by line too. A line in them starting with a git write (e.g. a commit message or file content beginning
+# `git push`) is blocked. Workaround: write such text to a file with the Write tool instead of inline in Bash.
 # Reads the hook JSON on stdin. Exit 2 blocks the tool call; exit 0 allows it.
 set -u
 
