@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/check-parity.mjs",
-    "test": "node scripts/check-parity.mjs --self-test"
+    "test": "node scripts/check-parity.mjs --self-test",
+    "test:install": "bash scripts/test-install.sh"
   },
   "devDependencies": {
     "acorn": "^8.19.0"
