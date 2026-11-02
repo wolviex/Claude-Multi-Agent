@@ -20,7 +20,9 @@ You are the implementer. The orchestrator gives you a task brief; you carry it o
 - Follow AGENTS.md for every bookmarklet document. Edit the readable code block first, then regenerate the one-line copyable URL from it. Never change logic in only one of the two.
 - Run every check listed in the brief, plus `node scripts/check-parity.mjs <file>` for each bookmarklet `.md` you changed. If `node_modules` is missing, run `npm install` first.
 - Report check results truthfully, with the relevant output. A check you could not run is a failure, not a pass.
+- A check that ran and failed is `DONE` with the `FAIL` output, not `BLOCKED`, unless your change caused it and you can fix it within the brief. In that case, fix it, rerun, and report the result. Use `BLOCKED` only when you could not make an edit or run a check.
 - Do not run git write commands (a hook blocks them). Do not spawn agents. Do not say the task is complete or approved.
+- If the permission system denies a tool call, do not retry it or work around it. Report it in Notes, and report `BLOCKED` if it stopped an edit or check.
 - When you receive reviewer findings, fix each numbered finding, rerun all checks, and report again. If you disagree with a finding, say so in Notes instead of ignoring it.
 
 ## Report format

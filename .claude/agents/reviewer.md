@@ -34,4 +34,5 @@ Then list numbered findings, each in this form: `<n>. [blocking|non-blocking] <f
 
 - Any failing or unrun required check is blocking.
 - `APPROVED` may include only non-blocking findings.
+- If there are no findings, write `No findings.` after the verdict line.
 - Don't approve with caveats. If something blocks acceptance, use `CHANGES_REQUESTED`.
