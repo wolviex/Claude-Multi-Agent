@@ -1,10 +1,40 @@
 #!/usr/bin/env bash
-# PreToolUse hook for subagents: blocks git write subcommands, allows read-only git.
+# PreToolUse hook: blocks git write subcommands from subagents, allows read-only git and all main-session calls.
+# Registered in .claude/settings.json (fires for every Bash call) and in each agent's frontmatter; the agent_id/agent_type gate keeps the orchestrator unaffected.
 # Guardrail against accidents, not a security boundary: indirect invocations (e.g. `$g commit`, `xargs git commit`) are not caught.
+# Known limitation (not a bug): the command is split into lines and segments and each is scanned alone, so heredoc bodies and multi-line
+# quoted strings are scanned line by line too. A line in them starting with a git write (e.g. a commit message or file content beginning
+# `git push`) is blocked. Workaround: write such text to a file with the Write tool instead of inline in Bash.
 # Reads the hook JSON on stdin. Exit 2 blocks the tool call; exit 0 allows it.
 set -u
 
 input="$(cat)"
+
+block() {
+  echo "Blocked: subagents may not run git write commands ($1). Report your changes to the orchestrator instead." >&2
+  exit 2
+}
+
+# Subagent gate: a call is from a subagent when it carries agent_id, or agent_type implementer/reviewer.
+# Anything else is a main-session call and is allowed.
+agent_id=""
+agent_type=""
+if command -v jq >/dev/null 2>&1; then
+  agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+  agent_type="$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)"
+else
+  case "$input" in
+    *'"agent_id"'*) agent_id="unknown" ;;
+  esac
+fi
+if [ -z "$agent_id" ] && [ "$agent_type" != "implementer" ] && [ "$agent_type" != "reviewer" ]; then
+  exit 0
+fi
+
+# Subagent call without jq: fail closed, since the command cannot be parsed.
+if ! command -v jq >/dev/null 2>&1; then
+  block "jq not installed; hook cannot parse the command"
+fi
 
 cmd="$input"
 if command -v jq >/dev/null 2>&1; then
@@ -26,12 +56,20 @@ branch_tag_readonly() {
       --list|-l) has_list=1 ;;
     esac
   done
-  for a in "$@"; do
+  local -a argv=("$@")
+  local n=$# i=0
+  while [ "$i" -lt "$n" ]; do
+    a="${argv[$i]}"
+    case "$a" in
+      # Filter flags that take a value: the next argument is the value, not a branch/tag name.
+      --contains|--no-contains|--merged|--no-merged|--points-at) i=$((i + 2)); continue ;;
+    esac
     case "$a" in
       -d|-D|-m|-M|-c|-C|-f|-u|--delete|--move|--copy|--force|--set-upstream|--set-upstream-to|--set-upstream-to=*|--unset-upstream|--edit-description) return 1 ;;
       -*) ;;
       *) [ "$has_list" -eq 1 ] || return 1 ;;
     esac
+    i=$((i + 1))
   done
   return 0
 }
@@ -108,6 +146,13 @@ check_cmd() {
       case "$first" in
         --get|--get-all|--get-regexp|--list|-l) return 0 ;;
       esac
+      # Single dotted key (section.key) with no flags is a read.
+      if [ "${#args[@]}" -eq 1 ]; then
+        case "$first" in
+          -*|"") ;;
+          *.*) return 0 ;;
+        esac
+      fi
       block config ;;
     reflog)
       # Only expire and delete write; bare reflog and show (or other options) are read-only.

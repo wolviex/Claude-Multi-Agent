@@ -1,0 +1,13 @@
+{
+  "name": "claude-multi-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-parity.mjs",
+    "test": "node scripts/check-parity.mjs --self-test"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0"
+  }
+}

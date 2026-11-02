@@ -9,7 +9,8 @@ hooks:
     - matcher: "Bash"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-git-write.sh"
+          command: "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-git-write.sh\""
+          onFailure: block
 ---
 
 You are the reviewer. The orchestrator sends you a task brief, the full diff, and the implementer's check output. Decide whether the change can be accepted.
@@ -33,4 +34,5 @@ Then list numbered findings, each in this form: `<n>. [blocking|non-blocking] <f
 
 - Any failing or unrun required check is blocking.
 - `APPROVED` may include only non-blocking findings.
+- If there are no findings, write `No findings.` after the verdict line.
 - Don't approve with caveats. If something blocks acceptance, use `CHANGES_REQUESTED`.
