@@ -5,9 +5,13 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
-FILES=".claude/multi-agent.md .claude/agents/implementer.md .claude/agents/reviewer.md .claude/hooks/block-git-write.sh"
+FILES=".claude/multi-agent.md .claude/agents/implementer.md .claude/agents/supervisor.md .claude/agents/architect.md .claude/hooks/block-git-write.sh .claude/hooks/agent-gate.sh"
 HOOK=".claude/hooks/block-git-write.sh"
+GATE=".claude/hooks/agent-gate.sh"
 IMPORT_LINE="@.claude/multi-agent.md"
+
+# Default multiAgent block from the design spec (compact form; compared with jq -S).
+MULTI_DEFAULTS='{"roles":{"orchestrator":{"model":"opus"},"supervisor":{"agent":"supervisor","model":"sonnet"},"implementer":{"agent":"implementer","model":"haiku"},"architect":{"agent":"architect","model":"fable"}},"architect":{"enabled":true,"requireManualEnable":false,"maxRunsPerBranch":3,"maxRunsPerDay":3,"outputDir":"dev"}}'
 
 PASSED=0
 FAILED=0
@@ -80,6 +84,8 @@ new_target() {
 }
 
 HOOK_COUNT_FILTER='[.hooks.PreToolUse[].hooks[].command | select(contains("block-git-write.sh"))] | length'
+GATE_A_FILTER='[.hooks.PreToolUse[] | select(.matcher == "Agent|Task" and (.hooks[0].command | contains("agent-gate.sh")))] | length'
+GATE_B_FILTER='[.hooks.PreToolUse[] | select(.matcher == "Write|Edit|NotebookEdit" and (.hooks[0].command | contains("agent-gate.sh")))] | length'
 
 echo "== (a) fresh empty directory"
 T_A="$(new_target)"
@@ -88,21 +94,27 @@ expect_eq "(a) install exits 0" 0 "$RC"
 for f in $FILES; do
   check "(a) $f installed and identical to source" cmp -s "$SRC/$f" "$T_A/$f"
 done
-check "(a) hook is executable" test -x "$T_A/$HOOK"
+check "(a) block-git-write hook is executable" test -x "$T_A/$HOOK"
+check "(a) agent-gate hook is executable" test -x "$T_A/$GATE"
 check "(a) settings.json is valid JSON" jq -e . "$T_A/.claude/settings.json"
-check "(a) settings.json has exactly one PreToolUse entry" jq -e '.hooks.PreToolUse | length == 1' "$T_A/.claude/settings.json"
+check "(a) settings.json has exactly three PreToolUse entries" jq -e '.hooks.PreToolUse | length == 3' "$T_A/.claude/settings.json"
 check "(a) PreToolUse entry command references block-git-write.sh" jq -e '.hooks.PreToolUse[0].hooks[0].command | contains("block-git-write.sh")' "$T_A/.claude/settings.json"
 check "(a) PreToolUse entry has onFailure block" jq -e '.hooks.PreToolUse[0].hooks[0].onFailure == "block"' "$T_A/.claude/settings.json"
+check "(a) Agent|Task agent-gate entry is registered" jq -e '.hooks.PreToolUse | map(select(.matcher == "Agent|Task")) | length == 1' "$T_A/.claude/settings.json"
+check "(a) Write|Edit|NotebookEdit agent-gate entry is registered" jq -e '.hooks.PreToolUse | map(select(.matcher == "Write|Edit|NotebookEdit")) | length == 1' "$T_A/.claude/settings.json"
+check "(a) agent-gate entries have no onFailure key" jq -e '[.hooks.PreToolUse[1:][] | .hooks[] | has("onFailure")] | any | not' "$T_A/.claude/settings.json"
 check "(a) CLAUDE.md contains the import line" grep -qxF "$IMPORT_LINE" "$T_A/CLAUDE.md"
 
 echo "== (b) second run on the same directory"
 run_install --dir "$T_A"
 expect_eq "(b) second run exits 0" 0 "$RC"
 expect_eq "(b) exactly one block-git-write hook entry" 1 "$(jq "$HOOK_COUNT_FILTER" "$T_A/.claude/settings.json")"
+expect_eq "(b) still exactly three PreToolUse entries" 3 "$(jq '.hooks.PreToolUse | length' "$T_A/.claude/settings.json")"
 expect_eq "(b) exactly one import line" 1 "$(grep -cxF "$IMPORT_LINE" "$T_A/CLAUDE.md")"
 for f in $FILES; do
   check "(b) $f reported as unchanged" grep -qxF "  $f: unchanged" "$LAST_OUT"
 done
+check "(b) multiAgent reported as kept on rerun" grep -qxF "  multiAgent: kept (existing configuration)" "$LAST_OUT"
 
 echo "== (c) existing CLAUDE.md and settings.json"
 T_C="$(new_target)"
@@ -116,8 +128,11 @@ expect_eq "(c) install exits 0" 0 "$RC"
 S_C="$T_C/.claude/settings.json"
 check "(c) permissions preserved" jq -e '.permissions.allow == ["Bash(ls:*)"]' "$S_C"
 check "(c) Edit hook preserved" jq -e '[.hooks.PreToolUse[] | select(.matcher == "Edit" and .hooks[0].command == "echo hi")] | length == 1' "$S_C"
-expect_eq "(c) two PreToolUse entries total" 2 "$(jq '.hooks.PreToolUse | length' "$S_C")"
+expect_eq "(c) four PreToolUse entries total" 4 "$(jq '.hooks.PreToolUse | length' "$S_C")"
 expect_eq "(c) one block-git-write hook entry added" 1 "$(jq "$HOOK_COUNT_FILTER" "$S_C")"
+expect_eq "(c) one Agent|Task agent-gate entry added" 1 "$(jq "$GATE_A_FILTER" "$S_C")"
+expect_eq "(c) one Write|Edit|NotebookEdit agent-gate entry added" 1 "$(jq "$GATE_B_FILTER" "$S_C")"
+expect_eq "(c) multiAgent defaults added" "$(printf '%s' "$MULTI_DEFAULTS" | jq -cS .)" "$(jq -cS .multiAgent "$S_C")"
 check "(c) original CLAUDE.md text preserved" grep -qxF "Existing notes that must survive." "$T_C/CLAUDE.md"
 expect_eq "(c) import line appended exactly once" 1 "$(grep -cxF "$IMPORT_LINE" "$T_C/CLAUDE.md")"
 
@@ -199,6 +214,7 @@ run_install --dir "$T_J"
 expect_eq "(j) install exits 0" 0 "$RC"
 check "(j) settings.json is still a symlink" test -L "$T_J/.claude/settings.json"
 check "(j) symlink target contains the block-git-write.sh entry" jq -e '[.hooks.PreToolUse[].hooks[].command | select(contains("block-git-write.sh"))] | length == 1' "$WORK/real-settings.json"
+check "(j) symlink target contains both agent-gate entries" jq -e '([.hooks.PreToolUse[] | select(.hooks[0].command | contains("agent-gate.sh"))] | length) == 2' "$WORK/real-settings.json"
 check "(j) symlink target keeps its original permissions key" jq -e '.permissions.allow == ["Bash(ls:*)"]' "$WORK/real-settings.json"
 
 echo "== (k) truncated install.sh runs nothing"
@@ -208,6 +224,94 @@ head -n "$TRUNC_LINES" "$INSTALL" > "$TRUNC"
 T_K="$(new_target)"
 MULTI_AGENT_SRC="$SRC" bash "$TRUNC" --dir "$T_K" >"$LAST_OUT" 2>&1
 check "(k) target directory is still empty" test -z "$(ls -A "$T_K")"
+
+echo "== (l) fresh install: multiAgent equals the spec defaults"
+T_L="$(new_target)"
+run_install --dir "$T_L"
+expect_eq "(l) install exits 0" 0 "$RC"
+expect_eq "(l) multiAgent equals spec defaults (jq -S)" "$(printf '%s' "$MULTI_DEFAULTS" | jq -S .)" "$(jq -S .multiAgent "$T_L/.claude/settings.json")"
+check "(l) output reports multiAgent added defaults" grep -qxF "  multiAgent: added defaults" "$LAST_OUT"
+
+echo "== (m) rerun keeps exactly three PreToolUse entries"
+T_M="$(new_target)"
+run_install --dir "$T_M"
+run_install --dir "$T_M"
+expect_eq "(m) second run exits 0" 0 "$RC"
+expect_eq "(m) still exactly three PreToolUse entries" 3 "$(jq '.hooks.PreToolUse | length' "$T_M/.claude/settings.json")"
+expect_eq "(m) exactly one block-git-write entry" 1 "$(jq "$HOOK_COUNT_FILTER" "$T_M/.claude/settings.json")"
+expect_eq "(m) exactly one Agent|Task agent-gate entry" 1 "$(jq "$GATE_A_FILTER" "$T_M/.claude/settings.json")"
+expect_eq "(m) exactly one Write|Edit|NotebookEdit agent-gate entry" 1 "$(jq "$GATE_B_FILTER" "$T_M/.claude/settings.json")"
+
+echo "== (n) existing custom multiAgent is preserved"
+T_N="$(new_target)"
+mkdir -p "$T_N/.claude"
+printf '%s\n' '{"multiAgent":{"roles":{"implementer":{"agent":"implementer","model":"sonnet"}}}}' > "$T_N/.claude/settings.json"
+ORIG_MA_N="$(jq -c .multiAgent "$T_N/.claude/settings.json")"
+run_install --dir "$T_N"
+expect_eq "(n) install exits 0" 0 "$RC"
+expect_eq "(n) custom multiAgent preserved (compact JSON)" "$ORIG_MA_N" "$(jq -c .multiAgent "$T_N/.claude/settings.json")"
+check "(n) output reports multiAgent kept" grep -qxF "  multiAgent: kept (existing configuration)" "$LAST_OUT"
+expect_eq "(n) three PreToolUse entries added" 3 "$(jq '.hooks.PreToolUse | length' "$T_N/.claude/settings.json")"
+run_install --dir "$T_N" --force
+expect_eq "(n) run with --force exits 0" 0 "$RC"
+expect_eq "(n) custom multiAgent still preserved with --force (compact JSON)" "$ORIG_MA_N" "$(jq -c .multiAgent "$T_N/.claude/settings.json")"
+check "(n) output reports multiAgent kept with --force" grep -qxF "  multiAgent: kept (existing configuration)" "$LAST_OUT"
+
+echo "== (o) existing Agent|Task gate entry, no Write|Edit entry"
+T_O="$(new_target)"
+mkdir -p "$T_O/.claude"
+cat > "$T_O/.claude/settings.json" <<'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"Agent|Task","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""}]}]}}
+EOF
+S_O="$T_O/.claude/settings.json"
+ORIG_A_O="$(jq -c '.hooks.PreToolUse[0]' "$S_O")"
+run_install --dir "$T_O"
+expect_eq "(o) install exits 0" 0 "$RC"
+expect_eq "(o) exactly one Agent|Task gate entry" 1 "$(jq "$GATE_A_FILTER" "$S_O")"
+expect_eq "(o) Agent|Task entry unchanged" "$ORIG_A_O" "$(jq -c '.hooks.PreToolUse[0]' "$S_O")"
+expect_eq "(o) exactly one Write|Edit|NotebookEdit gate entry added" 1 "$(jq "$GATE_B_FILTER" "$S_O")"
+expect_eq "(o) exactly one block-git-write entry added" 1 "$(jq "$HOOK_COUNT_FILTER" "$S_O")"
+expect_eq "(o) three PreToolUse entries total" 3 "$(jq '.hooks.PreToolUse | length' "$S_O")"
+check "(o) status lists only the Write|Edit gate as added" grep -qF "agent-gate (Write|Edit|NotebookEdit)" "$LAST_OUT"
+check "(o) status does not list the Agent|Task gate as added" bash -c "! grep -qF 'agent-gate (Agent|Task)' '$LAST_OUT'"
+
+echo "== (p) legacy reviewer.md is reported and kept"
+T_P="$(new_target)"
+mkdir -p "$T_P/.claude/agents"
+printf '%s\n' '# legacy reviewer' > "$T_P/.claude/agents/reviewer.md"
+cp "$T_P/.claude/agents/reviewer.md" "$WORK/reviewer-legacy.md"
+run_install --dir "$T_P"
+expect_eq "(p) install exits 0" 0 "$RC"
+check "(p) NOTE about the legacy reviewer agent printed" grep -qF "NOTE: .claude/agents/reviewer.md is the legacy reviewer agent" "$LAST_OUT"
+check "(p) NOTE says it is superseded by supervisor.md" grep -qF "superseded by" "$LAST_OUT"
+check "(p) legacy status line printed" grep -qxF "  legacy .claude/agents/reviewer.md: found (delete it after review)" "$LAST_OUT"
+check "(p) legacy reviewer.md still present and unchanged" cmp -s "$WORK/reviewer-legacy.md" "$T_P/.claude/agents/reviewer.md"
+
+echo "== (q) agent-gate denies a sonnet implementer and allows haiku"
+GATE_IN_DENY='{"tool_name":"Agent","tool_input":{"subagent_type":"implementer","model":"sonnet"}}'
+GATE_IN_ALLOW='{"tool_name":"Agent","tool_input":{"subagent_type":"implementer","model":"haiku"}}'
+OUT_Q_DENY="$(printf '%s' "$GATE_IN_DENY" | CLAUDE_PROJECT_DIR="$T_A" bash "$T_A/$GATE" 2>/dev/null)"
+rc=$?
+expect_eq "(q) deny case exits 0" 0 "$rc"
+check "(q) deny case prints permissionDecision deny" bash -c "printf '%s' '$OUT_Q_DENY' | jq -e '.hookSpecificOutput.permissionDecision == \"deny\"'"
+OUT_Q_ALLOW="$(printf '%s' "$GATE_IN_ALLOW" | CLAUDE_PROJECT_DIR="$T_A" bash "$T_A/$GATE" 2>/dev/null)"
+rc=$?
+expect_eq "(q) allow case exits 0" 0 "$rc"
+expect_eq "(q) allow case prints nothing" "" "$OUT_Q_ALLOW"
+
+echo "== (r) installed files include all six, and both hooks are executable"
+T_R="$(new_target)"
+run_install --dir "$T_R"
+expect_eq "(r) install exits 0" 0 "$RC"
+count_r=0
+for f in $FILES; do
+  if [ -f "$T_R/$f" ]; then
+    count_r=$((count_r + 1))
+  fi
+done
+expect_eq "(r) all six framework files installed" 6 "$count_r"
+check "(r) block-git-write.sh is executable" test -x "$T_R/.claude/hooks/block-git-write.sh"
+check "(r) agent-gate.sh is executable" test -x "$T_R/.claude/hooks/agent-gate.sh"
 
 echo
 printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
