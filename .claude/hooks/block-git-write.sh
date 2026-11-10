@@ -15,7 +15,7 @@ block() {
   exit 2
 }
 
-# Subagent gate: a call is from a subagent when it carries agent_id, or agent_type implementer/reviewer.
+# Subagent gate: a call is from a subagent when it carries agent_id, or agent_type implementer/supervisor/architect/reviewer (legacy).
 # Anything else is a main-session call and is allowed.
 agent_id=""
 agent_type=""
@@ -27,7 +27,7 @@ else
     *'"agent_id"'*) agent_id="unknown" ;;
   esac
 fi
-if [ -z "$agent_id" ] && [ "$agent_type" != "implementer" ] && [ "$agent_type" != "reviewer" ]; then
+if [ -z "$agent_id" ] && [ "$agent_type" != "implementer" ] && [ "$agent_type" != "supervisor" ] && [ "$agent_type" != "architect" ] && [ "$agent_type" != "reviewer" ]; then
   exit 0
 fi
 
