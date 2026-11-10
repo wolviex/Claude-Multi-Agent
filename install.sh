@@ -26,8 +26,10 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [--force] [--ref <git-ref>] [--dir <path>] [-h|--help]
 
-Adds the Claude multi-agent framework (.claude/multi-agent.md, agents, hook,
-settings.json hook entry, CLAUDE.md import) to a project.
+Adds the Claude multi-agent framework to a project: .claude/multi-agent.md, the
+implementer, supervisor and architect agents, the block-git-write and agent-gate
+hooks, their settings.json registrations, the multiAgent role defaults, and the
+CLAUDE.md import.
 
 Options:
   --force           overwrite framework files that differ from upstream
@@ -40,7 +42,7 @@ Environment:
   MULTI_AGENT_REF   ref when --ref is not given (default: main)
   MULTI_AGENT_SRC   local checkout to copy from instead of downloading
 
-Requires Claude Code 2.1.295 or later (the hook uses "onFailure").
+Requires Claude Code 2.1.295 or later (the block-git-write hook uses "onFailure").
 EOF
 }
 
@@ -82,7 +84,7 @@ fetch_one() {
 }
 
 # install_file <relative-path>
-# Uses globals STAGE, TARGET, FORCE, HOOK_REL.
+# Uses globals STAGE, TARGET, FORCE. Hook scripts (.claude/hooks/*.sh) are made executable.
 install_file() {
   local rel="$1" src dst status
   src="$STAGE/$rel"
@@ -101,9 +103,13 @@ install_file() {
     status="skipped (local changes; re-run with --force to overwrite)"
   fi
 
-  if [ "$rel" = "$HOOK_REL" ] && [ "$status" != "skipped (local changes; re-run with --force to overwrite)" ]; then
-    chmod +x "$dst"
-  fi
+  case "$rel" in
+    .claude/hooks/*.sh)
+      if [ "$status" != "skipped (local changes; re-run with --force to overwrite)" ]; then
+        chmod +x "$dst"
+      fi
+      ;;
+  esac
 
   report "$rel" "$status"
 }
@@ -111,7 +117,8 @@ install_file() {
 main() {
   set -euo pipefail
 
-  local REPO REF SRC TARGET FORCE FILES HOOK_REL IMPORT_LINE ENTRY_JSON
+  local REPO REF SRC TARGET FORCE FILES IMPORT_LINE
+  local ENTRY_JSON GATE_AGENT_JSON GATE_WRITE_JSON MULTI_AGENT_JSON
   local HAVE_JQ SETTINGS CLAUDE_MD
   REPO="${MULTI_AGENT_REPO:-wolviex/Claude-Multi-Agent}"
   REF="${MULTI_AGENT_REF:-main}"
@@ -120,13 +127,22 @@ main() {
   FORCE=0
 
   # Framework files, relative to the repo root and to the target root.
-  FILES=".claude/multi-agent.md .claude/agents/implementer.md .claude/agents/reviewer.md .claude/hooks/block-git-write.sh"
-  HOOK_REL=".claude/hooks/block-git-write.sh"
+  FILES=".claude/multi-agent.md .claude/agents/implementer.md .claude/agents/supervisor.md .claude/agents/architect.md .claude/hooks/block-git-write.sh .claude/hooks/agent-gate.sh"
   IMPORT_LINE="@.claude/multi-agent.md"
 
-  # Hook entry for settings.json. $CLAUDE_PROJECT_DIR must stay literal; Claude Code expands it.
+  # Hook entries for settings.json. $CLAUDE_PROJECT_DIR must stay literal; Claude Code expands it.
+  # The block-git-write entry fails closed (onFailure). The agent-gate entries have no
+  # onFailure, so a crash in that hook never locks the orchestrator out; its denials are
+  # printed as JSON.
   # shellcheck disable=SC2016
   ENTRY_JSON='{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-git-write.sh\"","onFailure":"block"}]}'
+  # shellcheck disable=SC2016
+  GATE_AGENT_JSON='{"matcher":"Agent|Task","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""}]}'
+  # shellcheck disable=SC2016
+  GATE_WRITE_JSON='{"matcher":"Write|Edit|NotebookEdit","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""}]}'
+
+  # Default top-level multiAgent block, added only when settings.json has no multiAgent key.
+  MULTI_AGENT_JSON='{"roles":{"orchestrator":{"model":"opus"},"supervisor":{"agent":"supervisor","model":"sonnet"},"implementer":{"agent":"implementer","model":"haiku"},"architect":{"agent":"architect","model":"fable"}},"architect":{"enabled":true,"requireManualEnable":false,"maxRunsPerBranch":3,"maxRunsPerDay":3,"outputDir":"dev"}}'
 
   # ---- Arguments -----------------------------------------------------------
 
@@ -228,12 +244,25 @@ main() {
     install_file "$rel"
   done
 
-  # settings.json: register the hook.
-  local settings_status="" manual_merge=0 tmp
+  # Legacy reviewer agent: superseded by supervisor.md. Reported, never deleted.
+  if [ -e "$TARGET/.claude/agents/reviewer.md" ]; then
+    report "legacy .claude/agents/reviewer.md" "found (delete it after review)"
+    printf '  NOTE: .claude/agents/reviewer.md is the legacy reviewer agent. It is superseded by\n'
+    printf '        .claude/agents/supervisor.md. Delete it once you have reviewed it; the installer\n'
+    printf '        does not delete it.\n'
+  fi
+
+  # settings.json: register the hooks and add the multiAgent defaults.
+  local settings_status="" ma_status="" manual_merge=0 tmp added
+  local need_block=0 need_agent=0 need_write=0 need_ma=0
   if [ ! -e "$SETTINGS" ]; then
     mkdir -p "$(dirname "$SETTINGS")"
     if [ "$HAVE_JQ" = 1 ]; then
-      jq -n --argjson entry "$ENTRY_JSON" '{hooks: {PreToolUse: [$entry]}}' > "$SETTINGS"
+      jq -n --argjson block "$ENTRY_JSON" \
+        --argjson agent "$GATE_AGENT_JSON" \
+        --argjson write "$GATE_WRITE_JSON" \
+        --argjson defaults "$MULTI_AGENT_JSON" \
+        '{hooks: {PreToolUse: [$block, $agent, $write]}, multiAgent: $defaults}' > "$SETTINGS"
     else
       cat > "$SETTINGS" <<'EOF'
 {
@@ -248,23 +277,101 @@ main() {
             "onFailure": "block"
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""
+          }
+        ]
       }
     ]
+  },
+  "multiAgent": {
+    "roles": {
+      "orchestrator": {
+        "model": "opus"
+      },
+      "supervisor": {
+        "agent": "supervisor",
+        "model": "sonnet"
+      },
+      "implementer": {
+        "agent": "implementer",
+        "model": "haiku"
+      },
+      "architect": {
+        "agent": "architect",
+        "model": "fable"
+      }
+    },
+    "architect": {
+      "enabled": true,
+      "requireManualEnable": false,
+      "maxRunsPerBranch": 3,
+      "maxRunsPerDay": 3,
+      "outputDir": "dev"
+    }
   }
 }
 EOF
     fi
     settings_status="registered (created settings.json)"
+    ma_status="added defaults"
   elif [ "$HAVE_JQ" = 0 ]; then
-    settings_status="not modified (jq not installed); merge the entry below into .claude/settings.json by hand"
+    settings_status="not modified (jq not installed); merge the pieces below into .claude/settings.json by hand"
+    ma_status="not checked (jq not installed); see below"
     manual_merge=1
   else
-    if jq -e '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("block-git-write.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+    # Each detection is independent: a missing piece is added, a present one is left alone.
+    if ! jq -e '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("block-git-write.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+      need_block=1
+    fi
+    if ! jq -e '[.hooks.PreToolUse[]? | select(.matcher == "Agent|Task") | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+      need_agent=1
+    fi
+    if ! jq -e '[.hooks.PreToolUse[]? | select(.matcher == "Write|Edit|NotebookEdit") | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+      need_write=1
+    fi
+    if ! jq -e 'has("multiAgent")' "$SETTINGS" >/dev/null 2>&1; then
+      need_ma=1
+    fi
+
+    if [ "$need_block$need_agent$need_write$need_ma" = "0000" ]; then
       settings_status="already registered"
+      ma_status="kept (existing configuration)"
     else
+      added=""
+      [ "$need_block" = 1 ] && added="$added block-git-write (Bash)"
+      [ "$need_agent" = 1 ] && added="$added agent-gate (Agent|Task)"
+      [ "$need_write" = 1 ] && added="$added agent-gate (Write|Edit|NotebookEdit)"
+      [ "$need_ma" = 1 ] && added="$added multiAgent"
       tmp="$SETTINGS.tmp.$$"
-      if jq --argjson entry "$ENTRY_JSON" \
-        '.hooks = (.hooks // {}) | .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [$entry])' \
+      if jq --argjson block "$ENTRY_JSON" \
+        --argjson agent "$GATE_AGENT_JSON" \
+        --argjson write "$GATE_WRITE_JSON" \
+        --argjson defaults "$MULTI_AGENT_JSON" \
+        --argjson need_block "$([ "$need_block" = 1 ] && echo true || echo false)" \
+        --argjson need_agent "$([ "$need_agent" = 1 ] && echo true || echo false)" \
+        --argjson need_write "$([ "$need_write" = 1 ] && echo true || echo false)" \
+        --argjson need_ma "$([ "$need_ma" = 1 ] && echo true || echo false)" \
+        '.hooks = (.hooks // {})
+         | .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [
+             (if $need_block then $block else empty end),
+             (if $need_agent then $agent else empty end),
+             (if $need_write then $write else empty end)])
+         | if $need_ma then .multiAgent = $defaults else . end' \
         "$SETTINGS" > "$tmp"; then
         if [ -L "$SETTINGS" ]; then
           # Replacing a symlink with mv would break the link; write through it instead.
@@ -273,7 +380,12 @@ EOF
         else
           mv "$tmp" "$SETTINGS"
         fi
-        settings_status="registered"
+        settings_status="registered (added:$added)"
+        if [ "$need_ma" = 1 ]; then
+          ma_status="added defaults"
+        else
+          ma_status="kept (existing configuration)"
+        fi
       else
         rm -f "$tmp"
         err "failed to update $SETTINGS; framework files were installed, settings.json was not changed"
@@ -281,10 +393,15 @@ EOF
       fi
     fi
   fi
-  echo "Hook registration:"
+  echo "Hook registration and settings:"
   report ".claude/settings.json" "$settings_status"
+  report "multiAgent" "$ma_status"
   if [ "$manual_merge" = 1 ]; then
-    printf '\n  Add this entry to the "PreToolUse" array in .claude/settings.json:\n\n%s\n\n' "$ENTRY_JSON"
+    printf '\n  Merge these into .claude/settings.json by hand. Skip any that are already present.\n\n'
+    printf '  Append these entries to the "hooks.PreToolUse" array:\n\n%s\n%s\n%s\n\n' \
+      "$ENTRY_JSON" "$GATE_AGENT_JSON" "$GATE_WRITE_JSON"
+    printf '  Add this top-level key, unless "multiAgent" already exists (keep yours if it does):\n\n"multiAgent": %s\n\n' \
+      "$MULTI_AGENT_JSON"
   fi
 
   # CLAUDE.md: import the framework. Carriage returns are stripped before matching so CRLF files work.
@@ -297,7 +414,7 @@ EOF
       '' \
       '## Required checks' \
       '' \
-      '- List the checks the implementer must run and the reviewer must rerun (for example `npm test`).' \
+      '- List the checks the implementer must run and the supervisor must rerun (for example `npm test`).' \
       > "$CLAUDE_MD"
     claude_status="created"
   else
@@ -321,8 +438,8 @@ EOF
 
   if [ "$HAVE_JQ" = 0 ]; then
     echo
-    echo "WARNING: jq is not installed. The hook blocks all subagent Bash calls until jq is"
-    echo "         installed (it fails closed, because it cannot parse the command)."
+    echo "WARNING: jq is not installed. The block-git-write hook blocks all subagent Bash calls"
+    echo "         until jq is installed (it fails closed, because it cannot parse the command)."
     echo "         Install jq (for example: brew install jq, or apt-get install jq)."
   fi
 
@@ -330,8 +447,13 @@ EOF
   echo "Next steps:"
   echo "  1. Review and commit .claude/ and CLAUDE.md."
   echo "  2. List the project's required checks in CLAUDE.md under \"## Required checks\"."
-  echo "  3. Run Claude Code as the orchestrator on Opus (use /model to select it)."
-  echo "  4. Claude Code 2.1.295 or later is needed for the hook's \"onFailure\" setting."
+  echo "  3. Role models are set in .claude/settings.json under \"multiAgent.roles\". Override them"
+  echo "     for one person in .claude/settings.local.json."
+  echo "  4. Run the main Claude Code session as the orchestrator on the model in"
+  echo "     multiAgent.roles.orchestrator (default opus; use /model to select it)."
+  echo "  5. The architect is gated by multiAgent.architect. With requireManualEnable set, start"
+  echo "     Claude Code with MULTI_AGENT_ENABLE_ARCHITECT=1 in the environment to allow it."
+  echo "  6. Claude Code 2.1.295 or later is needed for the block-git-write hook's \"onFailure\" setting."
   exit 0
 }
 

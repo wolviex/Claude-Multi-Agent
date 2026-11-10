@@ -10,7 +10,51 @@
             "onFailure": "block"
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh\""
+          }
+        ]
       }
     ]
+  },
+  "multiAgent": {
+    "roles": {
+      "orchestrator": {
+        "model": "opus"
+      },
+      "supervisor": {
+        "agent": "supervisor",
+        "model": "sonnet"
+      },
+      "implementer": {
+        "agent": "implementer",
+        "model": "haiku"
+      },
+      "architect": {
+        "agent": "architect",
+        "model": "fable"
+      }
+    },
+    "architect": {
+      "enabled": true,
+      "requireManualEnable": false,
+      "maxRunsPerBranch": 3,
+      "maxRunsPerDay": 3,
+      "outputDir": "dev"
+    }
   }
 }
