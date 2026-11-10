@@ -43,11 +43,6 @@ if command -v jq >/dev/null 2>&1; then
   fi
 fi
 
-block() {
-  echo "Blocked: subagents may not run git write commands ($1). Report your changes to the orchestrator instead." >&2
-  exit 2
-}
-
 # Returns 0 when branch/tag args are read-only (listing), 1 when they would create, delete, or modify.
 branch_tag_readonly() {
   local has_list=0 a
