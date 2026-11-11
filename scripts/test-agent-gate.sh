@@ -172,16 +172,112 @@ run_hook "$(mk_agent architect fable "" "")"
 expect_deny "e6 per-day cap 2 (no branch cap): run 3 is denied" 'per day'
 
 new_case
-write_settings
+write_settings '.multiAgent.architect.runLog = "git"'
 git -C "$PROJ" init -q -b feat-y
 STATE=""
 run_hook "$(mk_agent architect fable "" "")"
-expect_allow "e7 no MULTI_AGENT_STATE_DIR: architect run is allowed"
+expect_allow "e7 runLog git, no MULTI_AGENT_STATE_DIR: architect run is allowed"
 if [ -f "$PROJ/.git/multi-agent/architect-runs.log" ]; then
-  ok "e8 no MULTI_AGENT_STATE_DIR: run log is in the git common dir (.git/multi-agent)"
+  ok "e8 runLog git, no MULTI_AGENT_STATE_DIR: run log is in the git common dir (.git/multi-agent)"
 else
-  bad "e8 no MULTI_AGENT_STATE_DIR: run log is in the git common dir (.git/multi-agent)" "log not found"
+  bad "e8 runLog git, no MULTI_AGENT_STATE_DIR: run log is in the git common dir (.git/multi-agent)" "log not found"
 fi
+
+# --- s. Run log location without MULTI_AGENT_STATE_DIR (default: committed under outputDir).
+new_case
+write_settings
+git -C "$PROJ" init -q -b feat-s1
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_allow "s1a default runLog: architect run is allowed"
+if [ "$(wc -l < "$PROJ/dev/.architect-runs.log" 2>/dev/null | tr -d ' ')" = "1" ] && [ ! -e "$PROJ/.git/multi-agent" ]; then
+  ok "s1b default runLog: dev/.architect-runs.log has one line and .git/multi-agent is untouched"
+else
+  bad "s1b default runLog: dev/.architect-runs.log has one line and .git/multi-agent is untouched" "log=$(cat "$PROJ/dev/.architect-runs.log" 2>/dev/null) git_multi_agent_exists=$([ -e "$PROJ/.git/multi-agent" ] && echo yes || echo no)"
+fi
+
+new_case
+write_settings '.multiAgent.architect.outputDir = "docs/design"'
+git -C "$PROJ" init -q -b feat-s2
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_allow "s2a outputDir docs/design: architect run is allowed"
+if [ -f "$PROJ/docs/design/.architect-runs.log" ] && [ "$(wc -l < "$PROJ/docs/design/.architect-runs.log" | tr -d ' ')" = "1" ]; then
+  ok "s2b outputDir docs/design: log is at docs/design/.architect-runs.log"
+else
+  bad "s2b outputDir docs/design: log is at docs/design/.architect-runs.log" "not found or wrong line count"
+fi
+
+new_case
+write_settings '.multiAgent.architect.runLog = "logs/arch.log"'
+git -C "$PROJ" init -q -b feat-s4
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_allow "s4a runLog logs/arch.log: architect run is allowed"
+if [ -f "$PROJ/logs/arch.log" ] && [ "$(wc -l < "$PROJ/logs/arch.log" | tr -d ' ')" = "1" ] && [ ! -e "$PROJ/dev/.architect-runs.log" ]; then
+  ok "s4b runLog logs/arch.log: the run log is logs/arch.log and no default log is written"
+else
+  bad "s4b runLog logs/arch.log: the run log is logs/arch.log and no default log is written" "not found or wrong line count"
+fi
+
+new_case
+write_settings '.multiAgent.architect.runLog = "../outside.log"'
+git -C "$PROJ" init -q -b feat-s5
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "s5a runLog ../outside.log (escapes project): architect is denied" 'runLog'
+
+new_case
+write_settings '.multiAgent.architect.runLog = "/tmp/x.log"'
+git -C "$PROJ" init -q -b feat-s5b
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "s5b runLog /tmp/x.log (absolute): architect is denied" 'runLog'
+
+new_case
+write_settings
+git -C "$PROJ" init -q -b feat-s6
+STATE=""
+mkdir -p "$PROJ/dev"
+for i in 1 2 3; do printf '%s\tfeat-s6\ttoolu_seed%s\n' "$today" "$i"; done > "$PROJ/dev/.architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "s6 committed default log with 3 lines for the branch: 4th architect run is denied" 'limit reached for branch'
+
+new_case
+write_settings '.multiAgent.architect.runLog = "  "'
+git -C "$PROJ" init -q -b feat-s7
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_allow "s7a whitespace-only runLog: architect run is allowed"
+if [ -f "$PROJ/dev/.architect-runs.log" ] && [ ! -e "$PROJ/  " ]; then
+  ok "s7b whitespace-only runLog: default dev/.architect-runs.log is used and no file named by the blank value is created"
+else
+  bad "s7b whitespace-only runLog: default dev/.architect-runs.log is used and no file named by the blank value is created" "default log missing or blank-named file exists"
+fi
+
+new_case
+write_settings '.multiAgent.architect.runLog = 5'
+git -C "$PROJ" init -q -b feat-s8
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "s8a non-string runLog (5): architect is denied naming runLog" 'runLog'
+if [ ! -e "$PROJ/5" ]; then
+  ok "s8b non-string runLog (5): no file named 5 is created"
+else
+  bad "s8b non-string runLog (5): no file named 5 is created" "file 5 exists"
+fi
+
+new_case
+write_settings '.multiAgent.architect.outputDir = "../o"'
+git -C "$PROJ" init -q -b feat-s9
+STATE=""
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "s9 outputDir ../o (escapes project): architect run is denied naming outputDir" 'outputDir'
+
+new_case
+write_settings '.multiAgent.architect.outputDir = "../o"'
+run_hook "$(mk_write Write architect "$PROJ/dev/adr/0001-x.md")"
+expect_deny "s10 outputDir ../o: architect Write is denied naming outputDir" 'outputDir'
 
 # --- f. Architect enable switches.
 new_case

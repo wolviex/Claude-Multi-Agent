@@ -15,6 +15,8 @@ This file defines how work is split between models and when a change is accepted
 
 **Model check.** Before starting work, the orchestrator reads `multiAgent.roles` (the merge of `settings.json` and `settings.local.json`) and confirms it is running on `roles.orchestrator.model` (for example with the session's model info or `/model`). If it is not, it tells the user before beginning and waits for direction.
 
+**Guard check.** The hooks only run when the session reads this repository's `.claude/settings.json`. That is true for local sessions and for cloud sessions with a single repository. Cloud sessions with several repositories read only plugin keys from each repository's settings, and cloud threads inside a project read neither its hooks nor `.claude/agents/`. Before starting, the orchestrator confirms the session's project directory contains `.claude/settings.json` with the `block-git-write.sh` and `agent-gate.sh` entries. If it does not, it tells the user that model routing, the architect gates, and the git guard are not enforced in this session, and waits for direction.
+
 The definitions are in `.claude/agents/`, and each file's frontmatter pins its tools. The model is not pinned there; it comes from settings. Always delegate by agent name (`implementer`, `supervisor`, or `architect`). A general-purpose agent with a model override does not carry these rules or the git hook.
 
 Claude Code has no `advisor` tool. The Claude API's advisor tool is not available to subagents here. The `supervisor` subagent plays the advisor role, and the orchestrator handles the handoff because the implementer cannot spawn agents.
@@ -27,7 +29,7 @@ Claude Code has no `advisor` tool. The Claude API's advisor tool is not availabl
 2. **Gate check.** The orchestrator decides whether an architect gate applies (see the Architect section). If the supervisor said `none`, the orchestrator still considers gates 1 and 3 on its own judgement. If gate 1 applies, it runs the architect before any implementation starts.
 3. **Brief.** Start one `implementer` per task, using the supervisor's task brief. The orchestrator may adjust the brief. Independent tasks can run in parallel. Tasks that touch the same file run one after another.
 4. **Implement.** The implementer edits, runs the checks, and returns the implementer report.
-5. **Review.** The orchestrator runs `git add -N <task files>` and then `git diff -- <task files>` itself, rather than relying on a pasted diff. The intent-to-add step makes new, untracked files show up in the diff, and naming the task's files keeps parallel tasks out of each other's reviews. It then starts `supervisor` in Review mode and sends the task brief, the full diff, and the implementer's check output, beginning with this prompt: *"Review this code implementation against project standards and verify it passes structural checks."*
+5. **Review.** The orchestrator runs `git add -N <task files>` and then `git diff -- <task files>` itself, rather than relying on a pasted diff. The intent-to-add step makes new, untracked files show up in the diff, and naming the task's files keeps parallel tasks out of each other's reviews. When a task deletes or renames files, use `git diff HEAD -- <task files>` instead: `git add -N` on a directory also stages the deletion, and plain `git diff` then leaves it out. It then starts `supervisor` in Review mode and sends the task brief, the full diff, and the implementer's check output, beginning with this prompt: *"Review this code implementation against project standards and verify it passes structural checks."*
 6. **Iterate.** On `VERDICT: CHANGES_REQUESTED`, send the supervisor's numbered findings word for word to the same implementer (continue it with SendMessage, or start a new `implementer` with the original brief plus the findings if it can't be resumed), then go back to step 5 with a new review. Each task gets at most 3 review rounds. If the third round is also rejected, or the verdict carries an `Escalation:` line, the orchestrator evaluates architect gate 2. If gate 2 applies, the orchestrator runs the architect and then has the supervisor plan the follow-up work. Follow-up tasks planned from an architect run are new tasks and get a fresh 3 review rounds. A task that triggered gate 2 is closed and replaced by those follow-ups. If it does not apply, the orchestrator stops and reports the unresolved findings to the user.
 7. **Accept.** The orchestrator commits only after `VERDICT: APPROVED`, once every required check passes, and after its own senior check of the diff. Make one commit per approved task, with a message that describes the change.
 8. **Oversee.** After each commit, the orchestrator reviews progress against the plan and either confirms the next task or redirects with revised briefs.
@@ -49,15 +51,16 @@ The architect is idle unless one of these gates applies. Only the orchestrator d
 
 **Context budget.** The architect gets an architect brief with curated inputs: interface files, specs, constraints, and the specific failing state. Never the conversation history, and never large code dumps.
 
-**Usage limits.** The limits are set under `multiAgent.architect` in `.claude/settings.json` (or `settings.local.json`). `agent-gate.sh` enforces them and keeps the run log in the git directory, where it is never committed.
+**Usage limits.** The limits are set under `multiAgent.architect` in `.claude/settings.json` (or `settings.local.json`). `agent-gate.sh` enforces them and counts runs in a run log. By default the log is `<outputDir>/.architect-runs.log` inside the repository, and the orchestrator commits it with the architect's output, so the caps survive cloud sessions, which start from a fresh clone. Set `runLog` to `"git"` to keep it uncommitted in the git directory instead (caps then reset whenever the clone does).
 
 - `enabled`: `false` turns the architect off entirely.
 - `requireManualEnable`: `true` also requires `MULTI_AGENT_ENABLE_ARCHITECT=1` in the environment Claude Code was started with, for example `MULTI_AGENT_ENABLE_ARCHITECT=1 claude`.
 - `maxRunsPerBranch`: cap on architect runs per git branch. `0` means no cap.
 - `maxRunsPerDay`: cap on architect runs per UTC calendar day. `0` means no cap.
 - `outputDir`: repo-relative directory the architect may write into (default `dev`).
+- `runLog`: run log location. Absent means `<outputDir>/.architect-runs.log`; `"git"` means the git directory; any other value is a repo-relative path.
 
-**Output.** The architect writes only under `outputDir`. The orchestrator reviews the architect's output itself, commits it (one commit per architect run), and then has the supervisor plan follow-up tasks from it.
+**Output.** The architect writes only under `outputDir`. The orchestrator reviews the architect's output itself, commits it together with the run log (one commit per architect run), and then has the supervisor plan follow-up tasks from it.
 
 ## Task brief (orchestrator → implementer)
 
@@ -109,7 +112,7 @@ After the findings, the verdict may include one `Escalation: <reason>` line. It 
 
 - The project lists its required checks in CLAUDE.md or AGENTS.md (for example tests, linters, or format checks for particular file types). If it lists none, ask the user before the first task.
 - The orchestrator copies the checks that apply to a task into the brief's `Checks to run`. The implementer runs them, and the supervisor reruns them.
-- A check that could not run counts as a failure. Report it as `BLOCKED` and never as a pass.
+- A required check that could not run counts as a failure. Report it as `BLOCKED` and never as a pass. A brief may mark an extra check as optional (for example "if shellcheck is installed"); an optional check that is unavailable is reported as `SKIPPED (<reason>)`, not as a failure.
 
 ## Git
 

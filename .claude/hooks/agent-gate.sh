@@ -15,12 +15,21 @@
 #   If either settings file is not valid JSON, or jq is missing, Agent/Task calls that contain "fable" or
 #   "architect" are denied (fail closed for the architect only) and everything else is allowed, so the
 #   broken file can still be fixed.
-# Run log: <dir>/architect-runs.log, one line per allowed architect run: <YYYY-MM-DD UTC> TAB <branch or (none)> TAB <tool_use_id>.
-#   <dir> is $MULTI_AGENT_STATE_DIR if set, else <git common dir>/multi-agent, else <project>/.claude/.multi-agent-state.
-#   Inside .git the log is never committed.
+# Run log: one line per allowed architect run: <YYYY-MM-DD UTC> TAB <branch or (none)> TAB <tool_use_id>.
+#   Default location: <outputDir>/.architect-runs.log (dev/.architect-runs.log with the default outputDir).
+#   It is meant to be committed with the architect output, because cloud sessions start from a fresh clone
+#   on a fresh VM every time; a log kept under .git would be lost, and maxRunsPerBranch/maxRunsPerDay would reset.
+#   multiAgent.architect.runLog selects another location:
+#     absent or ""  the default above.
+#     "git"         <git common dir>/multi-agent/architect-runs.log (never committed); outside a repo it falls back
+#                   to <project>/.claude/.multi-agent-state/architect-runs.log.
+#     any other     a repo-relative file path. Absolute paths and paths that resolve outside the project are denied.
+#   MULTI_AGENT_STATE_DIR, when set, overrides all of the above: the log is $MULTI_AGENT_STATE_DIR/architect-runs.log.
+#   The default log sits inside the architect's writable outputDir, so the architect could edit it with Write;
+#   this is part of the guardrail limits below, not a security boundary.
 # Env vars:
 #   MULTI_AGENT_ENABLE_ARCHITECT  must be 1 when multiAgent.architect.requireManualEnable is true.
-#   MULTI_AGENT_STATE_DIR         overrides the run log directory (used by the tests).
+#   MULTI_AGENT_STATE_DIR         overrides the run log location (used by the tests).
 # Guardrail, not a security boundary: it does not resolve symlinks and does not see writes made through Bash.
 set -u
 
@@ -48,6 +57,23 @@ normalise_path() {
   done
   [ -n "$acc" ] || acc="/"
   printf '%s' "$acc"
+}
+
+# Sets out_dir (multiAgent.architect.outputDir) and out_abs (its normalised path under the project).
+# Denies, naming outputDir, when it is absolute or resolves outside the project. Needs proj and cfg_get.
+resolve_out_dir() {
+  out_dir="$(cfg_get '.multiAgent.architect.outputDir // "dev"')"
+  case "$out_dir" in
+    /*) deny "multiAgent.architect.outputDir must be a path relative to the project; absolute path \"$out_dir\" is not allowed." ;;
+  esac
+  local proj_base
+  proj_base="$(normalise_path "$proj")"
+  proj_base="${proj_base%/}"
+  out_abs="$(normalise_path "$proj/$out_dir")"
+  case "$out_abs" in
+    "$proj_base"/*) ;;
+    *) deny "multiAgent.architect.outputDir \"$out_dir\" resolves outside the project directory; use a path inside it." ;;
+  esac
 }
 
 # Without jq the config cannot be read. Fail closed only for architect-related Agent/Task calls.
@@ -163,18 +189,44 @@ case "$tool_name" in
       case "$max_branch" in ''|*[!0-9]*) deny "multiAgent.architect.maxRunsPerBranch must be a non-negative integer." ;; esac
       case "$max_day" in ''|*[!0-9]*) deny "multiAgent.architect.maxRunsPerDay must be a non-negative integer." ;; esac
 
+      log_file=""
       if [ -n "${MULTI_AGENT_STATE_DIR:-}" ]; then
-        state_dir="$MULTI_AGENT_STATE_DIR"
+        log_file="$MULTI_AGENT_STATE_DIR/architect-runs.log"
       else
-        common="$(git -C "$proj" rev-parse --git-common-dir 2>/dev/null)" || common=""
-        if [ -n "$common" ]; then
-          case "$common" in /*) ;; *) common="$proj/$common" ;; esac
-          state_dir="$common/multi-agent"
+        run_log_type="$(cfg_get '.multiAgent.architect.runLog | type')"
+        case "$run_log_type" in
+          null|string) ;;
+          *) deny "multiAgent.architect.runLog must be a string (a path, \"git\", or absent); found a JSON $run_log_type." ;;
+        esac
+        # Trim surrounding whitespace; a blank value means the default.
+        run_log="$(cfg_get '(.multiAgent.architect.runLog // "") | gsub("^\\s+|\\s+$"; "")')"
+        if [ "$run_log" = "git" ]; then
+          common="$(git -C "$proj" rev-parse --git-common-dir 2>/dev/null)" || common=""
+          if [ -n "$common" ]; then
+            case "$common" in /*) ;; *) common="$proj/$common" ;; esac
+            log_file="$common/multi-agent/architect-runs.log"
+          else
+            log_file="$proj/.claude/.multi-agent-state/architect-runs.log"
+          fi
         else
-          state_dir="$proj/.claude/.multi-agent-state"
+          if [ -z "$run_log" ]; then
+            resolve_out_dir
+            log_file="$out_abs/.architect-runs.log"
+          else
+            case "$run_log" in
+              /*) deny "multiAgent.architect.runLog must be a path relative to the project; absolute path \"$run_log\" is not allowed. Use \"git\" for the git directory." ;;
+            esac
+            proj_base="$(normalise_path "$proj")"
+            proj_base="${proj_base%/}"
+            log_file="$(normalise_path "$proj/$run_log")"
+            case "$log_file" in
+              "$proj_base"/*) ;;
+              *) deny "multiAgent.architect.runLog \"$run_log\" resolves outside the project directory; use a path inside it." ;;
+            esac
+          fi
         fi
       fi
-      log_file="$state_dir/architect-runs.log"
+      log_dir="${log_file%/*}"
 
       branch="$(git -C "$proj" branch --show-current 2>/dev/null)" || branch=""
       [ -n "$branch" ] || branch="(none)"
@@ -196,8 +248,8 @@ case "$tool_name" in
       fi
 
       tool_use_id="$(in_get '.tool_use_id // empty')"
-      if ! mkdir -p "$state_dir" 2>/dev/null || ! printf '%s\t%s\t%s\n' "$today" "$branch" "$tool_use_id" >> "$log_file" 2>/dev/null; then
-        deny "architect run log could not be written under $state_dir, so this run was not allowed."
+      if ! mkdir -p "$log_dir" 2>/dev/null || ! printf '%s\t%s\t%s\n' "$today" "$branch" "$tool_use_id" >> "$log_file" 2>/dev/null; then
+        deny "architect run log could not be written to $log_file, so this run was not allowed."
       fi
     fi
     exit 0 ;;
@@ -217,10 +269,9 @@ case "$tool_name" in
       *) abs="$proj/$path" ;;
     esac
     abs="$(normalise_path "$abs")"
-    out_dir="$(cfg_get '.multiAgent.architect.outputDir // "dev"')"
-    base="$(normalise_path "$proj/$out_dir")"
+    resolve_out_dir
     case "$abs" in
-      "$base"/*) exit 0 ;;
+      "$out_abs"/*) exit 0 ;;
       *) deny "The architect may only write under $out_dir/." ;;
     esac ;;
 esac

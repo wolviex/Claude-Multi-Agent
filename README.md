@@ -96,6 +96,7 @@ Uninstalling is manual:
 1. Delete `.claude/multi-agent.md`, `.claude/agents/implementer.md`, `.claude/agents/supervisor.md`, `.claude/agents/architect.md`, `.claude/hooks/block-git-write.sh`, and `.claude/hooks/agent-gate.sh`.
 2. In `.claude/settings.json`, remove the entry whose command contains `block-git-write.sh`, and both entries whose command contains `agent-gate.sh`, from the `hooks.PreToolUse` array. Remove the top-level `multiAgent` key.
 3. Remove the `@.claude/multi-agent.md` line from `CLAUDE.md`.
+4. Delete the run log if it is present: `dev/.architect-runs.log`, or your configured `runLog` path. If `runLog` is `"git"`, the log is in the git directory and is not part of the working tree.
 
 ## Configure models and the architect
 
@@ -137,8 +138,9 @@ MULTI_AGENT_ENABLE_ARCHITECT=1 claude
 - `maxRunsPerBranch`: cap on architect runs per git branch. `0` means no cap.
 - `maxRunsPerDay`: cap on architect runs per UTC calendar day. `0` means no cap.
 - `outputDir`: repo-relative directory the architect may write into. Default `dev`.
+- `runLog`: where the run log is kept (see **Run log** below). Absent means `<outputDir>/.architect-runs.log`, which is `dev/.architect-runs.log` by default. `"git"` keeps the log in the git directory, uncommitted. Any other value is a repo-relative path. Absolute paths and paths outside the repository are refused.
 
-**Run log.** Each allowed architect run is appended to `architect-runs.log`, which the caps count. The log is kept in the git directory (`<git common dir>/multi-agent/`), so it is never committed. If the project is not a git repository, it is written to `.claude/.multi-agent-state/` instead.
+**Run log.** Each allowed architect run is appended to the run log, and the caps count its entries. By default the log is `dev/.architect-runs.log`, committed with the architect's output, so the caps survive across clones (including cloud sessions). Set `runLog` to `"git"` to keep the log in the git directory (`<git common dir>/multi-agent/architect-runs.log`) instead. That log is never committed, and the caps reset when the clone is recreated. If the project is not a git repository, the `"git"` option uses `.claude/.multi-agent-state/` instead.
 
 ## Requirements
 
@@ -146,6 +148,36 @@ MULTI_AGENT_ENABLE_ARCHITECT=1 claude
 - bash, and curl or wget.
 - jq, strongly recommended. Without it, the installer cannot merge into an existing `settings.json` (it leaves the file unchanged and prints the entries to add by hand). `agent-gate.sh` also needs jq. Without it, the gate refuses every architect agent call (any call containing `fable` or `architect`), and it cannot enforce the architect's run limits or output directory. The `block-git-write.sh` hook blocks all subagent Bash calls, because it fails closed when it cannot parse the command.
 - git.
+
+## Cloud sessions
+
+The framework works in Claude Code cloud sessions that have a single repository. Other cloud setups load less of it, as the table shows.
+
+| Session type | Hooks run | Agents load | Notes |
+|---|---|---|---|
+| Local | Yes, from `.claude/settings.json` and the agents' frontmatter (frontmatter hooks need a trusted workspace) | Yes | Per-person overrides in `.claude/settings.local.json` apply. |
+| Cloud with one repository | Yes, from the repo's `.claude/settings.json` (frontmatter hooks do not run) | Yes | `CLAUDE.md` and its `@` imports load. `settings.local.json` is not read. |
+| Cloud with several repositories | No | Not documented; do not rely on it | The session starts above the clones and reads only `enabledPlugins` and `extraKnownMarketplaces` from each repo's settings. |
+| Cloud thread in a project | No | No | Threads inside a project apply none of the repo's settings hooks, permissions, or env, and do not load `.claude/agents/`. |
+
+- **Installing from a cloud session.** Ask the session to run the one-line installer, then review and commit the result. The default network setting (Trusted) allows `raw.githubusercontent.com`, so the installer works as is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wolviex/Claude-Multi-Agent/main/install.sh | bash
+```
+
+  With no network access or a custom network, add `raw.githubusercontent.com` to the allowed hosts, or install locally and push the commit.
+
+- **Architect switch.** There is no command line to prefix, so set `MULTI_AGENT_ENABLE_ARCHITECT=1` in the cloud environment's settings. It reaches the commands the session runs.
+- **jq and the setup script.** jq is in the default cloud image. A custom image without jq needs this line in the environment's setup script:
+
+```bash
+apt-get install -y jq
+```
+
+- **Run log persistence.** Each cloud session is a fresh clone on a fresh VM, so anything under `.git` is lost between sessions. The default run log, `dev/.architect-runs.log`, is committed with the architect's output, so the caps survive from one session to the next. Setting `runLog` to `"git"` keeps the log in the git directory instead. It is never committed, and the caps reset whenever the clone is recreated.
+- **Per-person settings.** `.claude/settings.local.json` is not read in cloud sessions, because it is not in the clone. Settings that must apply in cloud sessions belong in `.claude/settings.json` or in the cloud environment's variables.
+- **Guard check.** Before starting work, the orchestrator confirms that the hooks are present and tells you if enforcement is off. If the hooks are missing, the git guard and the architect gate are not enforced in that session. This happens in multi-repository sessions and cloud threads.
 
 ## How it works
 
@@ -188,7 +220,7 @@ Context budget: the architect gets a brief with curated inputs (interface files,
 
 Usage limits: the architect's switches and run caps are set in [Configure models and the architect](#configure-models-and-the-architect).
 
-The architect writes only under `outputDir`. The orchestrator reviews that output, commits it, and then has the supervisor plan follow-up tasks from it.
+The architect writes only under `outputDir`. The orchestrator reviews that output, commits it, and then has the supervisor plan follow-up tasks from it. The run log is written under `outputDir` by default and is committed with that output. Setting `runLog` to `"git"` keeps it out of the commit (see **Run log** in [Configure models and the architect](#configure-models-and-the-architect)).
 
 ### The git guard
 

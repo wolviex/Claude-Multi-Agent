@@ -452,8 +452,15 @@ EOF
   echo "  4. Run the main Claude Code session as the orchestrator on the model in"
   echo "     multiAgent.roles.orchestrator (default opus; use /model to select it)."
   echo "  5. The architect is gated by multiAgent.architect. With requireManualEnable set, start"
-  echo "     Claude Code with MULTI_AGENT_ENABLE_ARCHITECT=1 in the environment to allow it."
-  echo "  6. Claude Code 2.1.295 or later is needed for the block-git-write hook's \"onFailure\" setting."
+  echo "     Claude Code with MULTI_AGENT_ENABLE_ARCHITECT=1 in the environment to allow it. In a"
+  echo "     cloud session, set MULTI_AGENT_ENABLE_ARCHITECT=1 as an environment variable in the"
+  echo "     cloud environment's settings."
+  echo "  6. In cloud sessions, the hooks run only in sessions with this single repository (not in"
+  echo "     multi-repository sessions or project threads); see the README's Cloud sessions section."
+  echo "  7. By default the architect's run log is <outputDir>/.architect-runs.log (dev/.architect-runs.log"
+  echo "     with the default outputDir). Commit it with the architect's output so run caps persist"
+  echo "     across cloud sessions."
+  echo "  8. Claude Code 2.1.295 or later is needed for the block-git-write hook's \"onFailure\" setting."
   exit 0
 }
 
