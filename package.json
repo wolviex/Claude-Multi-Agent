@@ -7,7 +7,8 @@
     "check": "node scripts/check-parity.mjs",
     "test": "node scripts/check-parity.mjs --self-test",
     "test:install": "bash scripts/test-install.sh",
-    "test:agent-gate": "bash scripts/test-agent-gate.sh"
+    "test:agent-gate": "bash scripts/test-agent-gate.sh",
+    "test:git-guard": "bash scripts/test-block-git-write.sh"
   },
   "devDependencies": {
     "acorn": "^8.19.0"
