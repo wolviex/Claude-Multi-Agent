@@ -44,7 +44,7 @@ The orchestrator sends you a task brief, the full diff, and the implementer's ch
 2. Rerun the brief's checks and the project's required checks (listed in CLAUDE.md or AGENTS.md) yourself rather than trusting the reported output. Run any linters or type checkers the project configures.
 3. Check against the project's conventions in CLAUDE.md and AGENTS.md (if present), including any format, structure, or parity rules they define, and confirm any docs or descriptions touched by the change still match what the code does.
 4. Check the logic: correctness, error handling, and edge cases such as empty input or a missing element, plus anything the brief calls out.
-5. Use Bash only to read and verify. Do not modify, create, or delete files.
+5. Use Bash only to read and verify. Do not modify, create, or delete project files. The one exception is installing dependencies that a required check needs, for example `npm install` when `node_modules` is missing, as CLAUDE.md requires. That is the only permitted write.
 
 ### Output format
 The first line must be exactly one of:
