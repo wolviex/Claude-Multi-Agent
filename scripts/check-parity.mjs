@@ -65,9 +65,11 @@ function parseDocument(text) {
     const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
     if (heading) {
       const level = heading[1].length;
-      headings.push({ level, text: heading[2], line: i + 1 });
+      // CommonMark closing sequence: #s preceded by a space or tab, e.g. "## Purpose ##".
+      const text = heading[2].replace(/(^|[ \t]+)#+[ \t]*$/, '');
+      headings.push({ level, text, line: i + 1 });
       if (level === 1) section = null;
-      if (level === 2) section = heading[2];
+      if (level === 2) section = text;
     }
   }
 
@@ -172,8 +174,19 @@ function describe(value) {
   return typeof value === 'string' ? JSON.stringify(value) : String(value);
 }
 
+// `raw` is program meaning only for a template literal that is the quasi of a tagged template,
+// where the tag can read it (String.raw). Everywhere else it is formatting and is ignored.
+// Returns whether the child at `key` of `node` is such a template's raw-carrying part.
+function rawMeaningfulChild(node, key, inherited) {
+  if (node.type === 'TaggedTemplateExpression') return key === 'quasi';
+  if (node.type === 'TemplateLiteral') return key === 'quasis' && inherited;
+  if (node.type === 'TemplateElement') return key === 'value' && inherited;
+  return false;
+}
+
 // Deep-compares two ASTs and returns the first differing path, or null if equal.
-function findDifference(a, b, path) {
+// `rawMeaningful` is true inside a tagged template's quasi, where value.raw is compared.
+function findDifference(a, b, path, rawMeaningful = false) {
   if (a === b) return null;
   const mismatch = (detail) => ({ path, detail });
 
@@ -191,22 +204,40 @@ function findDifference(a, b, path) {
       if (i >= a.length || i >= b.length) {
         return { path: childPath, detail: 'present on only one side' };
       }
-      const diff = findDifference(a[i], b[i], childPath);
+      const diff = findDifference(a[i], b[i], childPath, rawMeaningful);
       if (diff) return diff;
     }
     return null;
   }
 
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const key of [...keys].filter((k) => !IGNORED_AST_KEYS.has(k)).sort()) {
+  const compared = [...keys].filter((k) => !IGNORED_AST_KEYS.has(k) || (k === 'raw' && rawMeaningful));
+  for (const key of compared.sort()) {
     const childPath = path ? `${path}.${key}` : key;
     if (!(key in a) || !(key in b)) {
       return { path: childPath, detail: 'present on only one side' };
     }
-    const diff = findDifference(a[key], b[key], childPath);
+    const childRaw = rawMeaningfulChild(a, key, rawMeaningful);
+    const diff = findDifference(a[key], b[key], childPath, childRaw);
     if (diff) return diff;
   }
   return null;
+}
+
+// A section must contain exactly one fenced block of any kind, and it must use the given info string.
+// Returns that fence, or null after recording a reason.
+function checkSingleFence(fences, info, sectionName, reasons) {
+  if (fences.length !== 1) {
+    reasons.push(`${sectionName}: expected exactly one fenced block (\`\`\`${info}), found ${fences.length}`);
+    return null;
+  }
+  const [fence] = fences;
+  if (fence.info !== info) {
+    const found = fence.info ? `\`\`\`${fence.info}` : 'no info string';
+    reasons.push(`${sectionName}: fenced block must use info string \`\`\`${info}, found ${found}`);
+    return null;
+  }
+  return fence;
 }
 
 // Returns an array of failure reasons for one document. An empty array means PASS.
@@ -219,19 +250,23 @@ function checkDocument(text) {
   }
   checkHeadings(doc.headings, reasons);
 
-  const urlBlocks = doc.fences.filter((f) => f.section === 'Copyable URL' && f.info === 'text');
-  const codeBlocks = doc.fences.filter((f) => f.section === 'Readable code' && f.info === 'js');
-  if (urlBlocks.length !== 1) {
-    reasons.push(`Copyable URL: expected exactly one \`\`\`text block, found ${urlBlocks.length}`);
-  }
-  if (codeBlocks.length !== 1) {
-    reasons.push(`Readable code: expected exactly one \`\`\`js block, found ${codeBlocks.length}`);
-  }
-  if (urlBlocks.length !== 1 || codeBlocks.length !== 1) return reasons;
+  const urlBlock = checkSingleFence(
+    doc.fences.filter((f) => f.section === 'Copyable URL'),
+    'text',
+    'Copyable URL',
+    reasons,
+  );
+  const codeBlock = checkSingleFence(
+    doc.fences.filter((f) => f.section === 'Readable code'),
+    'js',
+    'Readable code',
+    reasons,
+  );
+  if (!urlBlock || !codeBlock) return reasons;
 
-  const urlSource = extractUrlSource(urlBlocks[0].content, reasons);
+  const urlSource = extractUrlSource(urlBlock.content, reasons);
   const urlAst = urlSource === null ? null : parseSource(urlSource, 'Copyable URL', reasons);
-  const codeAst = parseSource(codeBlocks[0].content, 'Readable code', reasons);
+  const codeAst = parseSource(codeBlock.content, 'Readable code', reasons);
 
   if (urlAst) checkIife(urlAst, 'Copyable URL', reasons);
   if (codeAst) checkIife(codeAst, 'Readable code', reasons);
@@ -292,6 +327,9 @@ const FIXTURE_EXPECTATIONS = {
   'multiline.md': { pass: false, reason: /single line/ },
   'no-prefix.md': { pass: false, reason: /must start with 'javascript:'/ },
   'not-iife.md': { pass: false, reason: /not an IIFE/ },
+  'tagged-template-mismatch.md': { pass: false, reason: /AST mismatch/ },
+  'extra-fence.md': { pass: false, reason: /expected exactly one fenced block.*found 2/ },
+  'closing-hashes.md': { pass: true },
 };
 
 function runSelfTest() {
