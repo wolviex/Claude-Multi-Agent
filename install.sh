@@ -254,7 +254,10 @@ main() {
 
   # settings.json: register the hooks and add the multiAgent defaults.
   local settings_status="" ma_status="" manual_merge=0 tmp added
-  local need_block=0 need_agent=0 need_write=0 need_ma=0
+  local need_block=0 need_agent=0 need_write=0 need_ma=0 settings_preexisted=0
+  if [ -e "$SETTINGS" ]; then
+    settings_preexisted=1
+  fi
   if [ ! -e "$SETTINGS" ]; then
     mkdir -p "$(dirname "$SETTINGS")"
     if [ "$HAVE_JQ" = 1 ]; then
@@ -338,10 +341,13 @@ EOF
     if ! jq -e '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("block-git-write.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
       need_block=1
     fi
-    if ! jq -e '[.hooks.PreToolUse[]? | select(.matcher == "Agent|Task") | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+    # Matchers are compared as sets of tool names: "Task|Agent" and "Agent | Task" both count.
+    if ! jq -e 'def tools: split("|") | map(gsub("^\\s+|\\s+$";"")) | unique;
+      [.hooks.PreToolUse[]? | select((.matcher? | type) == "string" and (.matcher | tools) == ["Agent","Task"]) | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
       need_agent=1
     fi
-    if ! jq -e '[.hooks.PreToolUse[]? | select(.matcher == "Write|Edit|NotebookEdit") | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
+    if ! jq -e 'def tools: split("|") | map(gsub("^\\s+|\\s+$";"")) | unique;
+      [.hooks.PreToolUse[]? | select((.matcher? | type) == "string" and (.matcher | tools) == ["Edit","NotebookEdit","Write"]) | .hooks[]?.command? | select(type == "string" and contains("agent-gate.sh"))] | length > 0' "$SETTINGS" >/dev/null 2>&1; then
       need_write=1
     fi
     if ! jq -e 'has("multiAgent")' "$SETTINGS" >/dev/null 2>&1; then
@@ -403,8 +409,13 @@ EOF
     printf '  Add this top-level key, unless "multiAgent" already exists (keep yours if it does):\n\n"multiAgent": %s\n\n' \
       "$MULTI_AGENT_JSON"
   fi
+  # --force only overwrites framework files; an existing settings.json is never merged again.
+  if [ "$FORCE" = 1 ] && [ "$settings_preexisted" = 1 ]; then
+    printf '%s\n' "Note: --force does not update existing hook entries or multiAgent settings in .claude/settings.json; review them against the template by hand."
+  fi
 
-  # CLAUDE.md: import the framework. Carriage returns are stripped before matching so CRLF files work.
+  # CLAUDE.md: import the framework. CR, space and tab are stripped from each line before matching,
+  # so CRLF files and trailing whitespace work.
   local claude_status="" import_count
   if [ ! -e "$CLAUDE_MD" ]; then
     printf '%s\n' \
@@ -418,7 +429,7 @@ EOF
       > "$CLAUDE_MD"
     claude_status="created"
   else
-    import_count="$(tr -d '\r' < "$CLAUDE_MD" | grep -cxF "$IMPORT_LINE" || true)"
+    import_count="$(tr -d '\r' < "$CLAUDE_MD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -cxF "$IMPORT_LINE" || true)"
     if [ "$import_count" -gt 0 ]; then
       claude_status="unchanged"
     else
@@ -435,6 +446,78 @@ EOF
   fi
   echo "CLAUDE.md:"
   report "CLAUDE.md" "$claude_status"
+
+  # .gitattributes: mark the architect run log merge=union so runs from two branches are both kept.
+  # The path comes from the effective config (settings.json deep-merged with settings.local.json,
+  # read after the update above). Without jq the default path is used.
+  local ga="$TARGET/.gitattributes" ga_line="" ga_status="" ga_cfg="" ga_log="" ga_count
+  if [ "$HAVE_JQ" = 1 ]; then
+    if [ -e "$TARGET/.claude/settings.local.json" ]; then
+      ga_cfg="$(jq -s 'reduce .[] as $c ({}; . * $c)' "$SETTINGS" "$TARGET/.claude/settings.local.json" 2>/dev/null)" || ga_cfg=""
+    else
+      ga_cfg="$(jq -s 'reduce .[] as $c ({}; . * $c)' "$SETTINGS" 2>/dev/null)" || ga_cfg=""
+    fi
+    if [ -n "$ga_cfg" ]; then
+      # runLog and outputDir are trimmed of surrounding whitespace, as the hook does. The result
+      # has a leading "./" removed and repeated slashes collapsed, so git attribute patterns match.
+      ga_log="$(printf '%s\n' "$ga_cfg" | jq -r 'def trim: gsub("^\\s+|\\s+$"; "");
+        (.multiAgent.architect? // {}) as $a
+        | (if ($a.runLog | type) == "string" then ($a.runLog | trim) else "" end) as $rl
+        | (if ($a.outputDir | type) == "string" then ($a.outputDir | trim) else "" end) as $od0
+        | (if $od0 != "" then $od0 else "dev" end) as $od
+        | (if $rl != "" then $rl else ($od | sub("/+$"; "")) + "/.architect-runs.log" end)
+        | sub("^(\\./)+"; "") | gsub("/+"; "/")' 2>/dev/null)" || ga_log=""
+    fi
+  else
+    ga_log="dev/.architect-runs.log"
+  fi
+
+  if [ -z "$ga_log" ]; then
+    ga_status="skipped (could not read the architect run log path from settings)"
+  else
+    case "$ga_log" in
+      git)
+        ga_status="skipped (runLog is \"git\"; the log is kept outside the work tree)"
+        ;;
+      /*)
+        ga_status="skipped (run log path is absolute: $ga_log)"
+        ;;
+      *[[:space:]]*|*'*'*|*'?'*|*'['*)
+        # Git attribute patterns cannot hold spaces or glob characters reliably.
+        ga_status="skipped (run log path has spaces or glob characters: $ga_log)"
+        ;;
+      *)
+        case "/$ga_log/" in
+          */../*)
+            ga_status="skipped (run log path contains a .. segment: $ga_log)"
+            ;;
+          *)
+            ga_line="$ga_log merge=union"
+            if [ ! -e "$ga" ]; then
+              printf '%s\n' "$ga_line" > "$ga"
+              ga_status="created ($ga_line)"
+            else
+              # CR is stripped before matching so a CRLF file is not given a second copy.
+              ga_count="$(tr -d '\r' < "$ga" | grep -cxF "$ga_line" || true)"
+              if [ "$ga_count" -gt 0 ]; then
+                ga_status="unchanged"
+              else
+                if [ -s "$ga" ] && [ -n "$(tail -c 1 "$ga")" ]; then
+                  # Last line has no newline: finish it before appending.
+                  printf '\n%s\n' "$ga_line" >> "$ga"
+                else
+                  printf '%s\n' "$ga_line" >> "$ga"
+                fi
+                ga_status="added ($ga_line)"
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+  echo ".gitattributes:"
+  report ".gitattributes" "$ga_status"
 
   if [ "$HAVE_JQ" = 0 ]; then
     echo

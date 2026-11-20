@@ -5,6 +5,10 @@
 #   - Agent/Task calls: only the orchestrator may start agents. The requested role must be started with the
 #     model configured for it (an alias). The architect is gated: enabled flag, optional manual enable,
 #     per-branch and per-day run caps (counted from the run log).
+#     Per-branch runs are counted only from the fork point of the branch (merge-base with the base branch)
+#     onward, so a reused branch name starts fresh. See the fork-point rule below.
+#     A subagent_type of architect, supervisor or implementer that is not mapped to a role is denied, because
+#     it means the framework agent was renamed or unmapped. Other unmapped types (general-purpose, custom agents) pass.
 #   - Write/Edit/NotebookEdit calls: the architect may only write under architect.outputDir.
 # Registration: .claude/settings.json, hooks.PreToolUse, two entries with command
 #   bash "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-gate.sh" and no onFailure key, matchers "Agent|Task" and "Write|Edit|NotebookEdit".
@@ -12,9 +16,9 @@
 #   An allow prints nothing and exits 0.
 # Project dir: $CLAUDE_PROJECT_DIR, else the git top level of the hook input's cwd, else the cwd.
 # Config: if neither settings file has a multiAgent object, everything is allowed.
-#   If either settings file is not valid JSON, or jq is missing, Agent/Task calls that contain "fable" or
-#   "architect" are denied (fail closed for the architect only) and everything else is allowed, so the
-#   broken file can still be fixed.
+#   If either settings file is not valid JSON or is not a JSON object, or jq is missing, Agent/Task calls that
+#   contain "fable" or "architect" are denied (fail closed for the architect only) and everything else is
+#   allowed, so the broken file can still be fixed.
 # Run log: one line per allowed architect run: <YYYY-MM-DD UTC> TAB <branch or (none)> TAB <tool_use_id>.
 #   Default location: <outputDir>/.architect-runs.log (dev/.architect-runs.log with the default outputDir).
 #   It is meant to be committed with the architect output, because cloud sessions start from a fresh clone
@@ -124,12 +128,15 @@ if [ -z "$cfg" ]; then
         *'"fable"'*|*'"architect"'*)
           broken=""
           for f in "$settings_file" "$local_file"; do
-            if [ -s "$f" ] && ! jq -e . "$f" >/dev/null 2>&1; then
-              broken="${broken:+$broken and }.claude/${f##*/}"
+            [ -s "$f" ] || continue
+            if ! jq -e . "$f" >/dev/null 2>&1; then
+              broken="${broken:+$broken and }.claude/${f##*/} is not valid JSON"
+            elif ! jq -e 'type=="object"' "$f" >/dev/null 2>&1; then
+              broken="${broken:+$broken and }.claude/${f##*/} must be a JSON object"
             fi
           done
-          [ -n "$broken" ] || broken=".claude/settings.json or .claude/settings.local.json"
-          deny "multi-agent gate: $broken is not valid JSON, so the architect cannot be checked. Fix it and retry." ;;
+          [ -n "$broken" ] || broken=".claude/settings.json or .claude/settings.local.json is not valid JSON"
+          deny "multi-agent gate: $broken, so the architect cannot be checked. Fix it and retry." ;;
       esac ;;
   esac
   exit 0
@@ -159,6 +166,11 @@ case "$tool_name" in
 
     # Rule 3: no matching role.
     if [ -z "$role" ]; then
+      # A framework agent name with no role means its role was renamed or unmapped; deny rather than let it run unrouted.
+      case "$st" in
+        architect|supervisor|implementer)
+          deny "subagent_type \"$st\" is not mapped to a role in multiAgent.roles; use the configured agent name (architect: \"$arch_agent\") or map it." ;;
+      esac
       if [ -n "$arch_model" ] && [ "$model" = "$arch_model" ]; then
         deny "The $model model is reserved for the architect role; start it as subagent_type \"$arch_agent\"."
       fi
@@ -232,11 +244,41 @@ case "$tool_name" in
       [ -n "$branch" ] || branch="(none)"
       today="$(date -u +%Y-%m-%d)"
 
+      # Fork-point rule: per-branch runs count only from the date of the branch's fork point, the merge-base
+      # with the base branch (committer date, UTC). Reusing a branch name after its PR merged must start fresh,
+      # so older entries for the same name do not count. No base resolves, merge-base fails, or the branch is
+      # the base itself: every entry for the branch counts.
+      base_ref=""
+      for ref in refs/remotes/origin/HEAD refs/heads/main refs/heads/master refs/remotes/origin/main refs/remotes/origin/master; do
+        if git -C "$proj" rev-parse --verify -q "$ref" >/dev/null 2>&1; then base_ref="$ref"; break; fi
+      done
+      fork_date=""
+      if [ -n "$base_ref" ]; then
+        base_name=""
+        if [ "$base_ref" = "refs/remotes/origin/HEAD" ]; then
+          base_target="$(git -C "$proj" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)" || base_target=""
+          base_name="${base_target#refs/remotes/origin/}"
+          base_name="${base_name#refs/heads/}"
+        else
+          base_name="${base_ref#refs/remotes/origin/}"
+          base_name="${base_name#refs/heads/}"
+        fi
+        if [ "$branch" != "$base_name" ]; then
+          fork_sha="$(git -C "$proj" merge-base HEAD "$base_ref" 2>/dev/null)" || fork_sha=""
+          if [ -n "$fork_sha" ]; then
+            fork_date="$(TZ=UTC git -C "$proj" log -1 --format=%cd --date=format-local:%Y-%m-%d "$fork_sha" 2>/dev/null)" || fork_date=""
+          fi
+        fi
+      fi
+
       n_branch=0
       n_day=0
       if [ -f "$log_file" ]; then
         while IFS=$'\t' read -r log_day log_branch _; do
-          if [ "$log_branch" = "$branch" ]; then n_branch=$((n_branch + 1)); fi
+          if [ "$log_branch" = "$branch" ]; then
+            # Dates are YYYY-MM-DD, so string order is date order.
+            if [ -z "$fork_date" ] || [[ ! "$log_day" < "$fork_date" ]]; then n_branch=$((n_branch + 1)); fi
+          fi
           if [ "$log_day" = "$today" ]; then n_day=$((n_day + 1)); fi
         done < "$log_file"
       fi
@@ -248,6 +290,7 @@ case "$tool_name" in
       fi
 
       tool_use_id="$(in_get '.tool_use_id // empty')"
+      # A run is counted when the call is allowed here, even if the user later declines it or it fails.
       if ! mkdir -p "$log_dir" 2>/dev/null || ! printf '%s\t%s\t%s\n' "$today" "$branch" "$tool_use_id" >> "$log_file" 2>/dev/null; then
         deny "architect run log could not be written to $log_file, so this run was not allowed."
       fi
