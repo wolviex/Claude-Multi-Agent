@@ -372,6 +372,99 @@ expect_allow "m4 invalid settings.json: main-session Write is allowed"
 run_hook "$(mk_write Write implementer "src/a.ts")"
 expect_allow "m5 invalid settings.json: implementer Write is allowed"
 
+# commit_at DATE MESSAGE: commits in $PROJ with author and committer date DATE (ISO 8601, UTC).
+commit_at() {
+  GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" git -C "$PROJ" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "$2"
+}
+
+# --- n. Per-branch count starts at the fork point with the base branch.
+new_case
+write_settings '.multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b main
+commit_at 2026-10-15T12:00:00Z main-tip
+git -C "$PROJ" checkout -q -b feat
+printf '2026-10-01\tfeat\tt1\n' > "$STATE/architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_allow "n1 entry before the fork point (fork 2026-10-15, entry 2026-10-01) is not counted: architect is allowed"
+
+new_case
+write_settings '.multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b main
+commit_at 2026-09-01T12:00:00Z main-old
+git -C "$PROJ" checkout -q -b feat
+commit_at 2026-10-15T12:00:00Z feat-tip
+printf '2026-10-01\tfeat\tt1\n' > "$STATE/architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "n2 entry after the fork point (fork 2026-09-01, entry 2026-10-01) is counted: architect is denied" 'limit reached for branch'
+
+new_case
+write_settings '.multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b main
+commit_at 2026-10-01T12:00:00Z main-fork
+git -C "$PROJ" checkout -q -b feat
+printf '2026-10-01\tfeat\tt1\n' > "$STATE/architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "n3 entry on the same date as the fork point is counted: architect is denied" 'limit reached for branch'
+
+new_case
+write_settings '.multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b feat
+commit_at 2026-10-15T12:00:00Z feat-only
+printf '2026-10-01\tfeat\tt1\n' > "$STATE/architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "n4 no base branch resolves: every entry for the branch is counted, architect is denied" 'limit reached for branch'
+
+new_case
+write_settings '.multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b main
+commit_at 2026-10-15T12:00:00Z main-tip
+printf '2026-10-01\tmain\tt1\n' > "$STATE/architect-runs.log"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "n5 on the base branch itself: every entry for the branch is counted, architect is denied" 'limit reached for branch'
+
+# --- o. Framework agent names that are not mapped to a role.
+new_case
+write_settings '.multiAgent.roles.architect.agent = "designer"'
+git -C "$PROJ" init -q -b feat-o
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "o1 architect.agent renamed to designer: subagent_type architect is denied" 'use the configured agent name (architect: "designer")'
+
+new_case
+write_settings '.multiAgent.roles.architect.agent = "designer" | .multiAgent.architect.maxRunsPerBranch = 1'
+git -C "$PROJ" init -q -b feat-o2
+run_hook "$(mk_agent designer fable "" "")"
+expect_allow "o2a architect.agent renamed to designer: designer with model fable is allowed"
+run_hook "$(mk_agent designer fable "" "")"
+expect_deny "o2b renamed architect is gated: second run on the branch is denied by the cap" 'limit reached for branch'
+
+new_case
+write_settings
+run_hook "$(mk_agent general-purpose "" "" "")"
+expect_allow "o3 general-purpose with no model is allowed"
+
+new_case
+write_settings
+run_hook "$(mk_agent test-runner sonnet "" "")"
+expect_allow "o4 custom unmapped type test-runner with model sonnet is allowed"
+
+# --- p. Settings files that parse as JSON but are not objects.
+new_case
+write_settings
+printf '%s\n' '[]' > "$PROJ/.claude/settings.local.json"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "p1 settings.local.json is []: architect is denied saying it must be a JSON object" '.claude/settings.local.json must be a JSON object'
+
+new_case
+printf '%s\n' '[]' > "$PROJ/.claude/settings.json"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "p2 settings.json is []: architect is denied saying it must be a JSON object" '.claude/settings.json must be a JSON object'
+
+new_case
+write_settings
+printf '%s\n' '{"multiAgent": ' > "$PROJ/.claude/settings.local.json"
+run_hook "$(mk_agent architect fable "" "")"
+expect_deny "p3 settings.local.json truly invalid: still says is not valid JSON" '.claude/settings.local.json is not valid JSON'
+
 # --- k. The repo's settings.json is never touched.
 repo_after="$(sum_of "$repo_settings")"
 if [ "$repo_before" = "$repo_after" ]; then
