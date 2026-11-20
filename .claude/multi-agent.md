@@ -11,6 +11,8 @@ This file defines how work is split between models and when a change is accepted
 | implementer | `implementer` | Code writer: single-file or localized edits per brief, runs checks, reports. Its work goes back to the supervisor for verification (the orchestrator relays it unchanged; the implementer cannot call agents). | Commit. Spawn agents. Declare work complete. |
 | architect | `architect` | On-demand systems architect and domain synthesizer. Idle by default. Only the orchestrator invokes it, and only when a gate in the Architect section triggers. Writes design documents only, under the configured output directory (default `dev`). | Edit code. Spawn agents. Use Bash. |
 
+**Enforcement.** Hooks enforce some of these rules on a best-effort basis. They are guardrails, not security boundaries. Hook-enforced: subagents cannot start agents; subagent git writes are blocked by `block-git-write.sh`, which has documented bypasses such as variable indirection, `xargs`, and heredoc bodies; mapped roles must be started with their configured model; unmapped framework agent names (`architect`, `supervisor`, `implementer`) are denied; the architect's enable switches and run caps apply; the architect may write only under `outputDir`. Prompt-only, not enforced by any hook: the orchestrator does not edit project files; the supervisor does not write through Bash; the implementer stays within its brief; `general-purpose` and other unmapped agents carry none of the role rules. The git hook still applies to them, because it keys on `agent_id`.
+
 **Models come from settings.** Each role's model is set in `multiAgent.roles` in `.claude/settings.json`. A person can override it in `.claude/settings.local.json`. Defaults: orchestrator `opus`, supervisor `sonnet`, implementer `haiku`, architect `fable`. Values must be one of the aliases `opus`, `sonnet`, `haiku`, or `fable`. When starting a subagent, the orchestrator always passes that role's model as the Agent tool's `model` parameter. The `agent-gate.sh` hook rejects a call whose model does not match.
 
 **Model check.** Before starting work, the orchestrator reads `multiAgent.roles` (the merge of `settings.json` and `settings.local.json`) and confirms it is running on `roles.orchestrator.model` (for example with the session's model info or `/model`). If it is not, it tells the user before beginning and waits for direction.
@@ -39,10 +41,12 @@ If the implementer reports `BLOCKED`, the orchestrator fixes the brief or asks t
 
 ## Architect (on demand)
 
+In this file, `outputDir` means `multiAgent.architect.outputDir` (default `dev`).
+
 The architect is idle unless one of these gates applies. Only the orchestrator decides whether a gate applies.
 
-1. **Greenfield architecture and interface contracts.** Once, before code generation begins on a new system or subsystem: cross-boundary interface specs, API schemas, and high-level design (for example `dev/project_spec.md`).
-2. **Ambiguity and complex decision gate.** When an edge case or platform constraint stalls the supervisor and implementer loop (for example, a task hits its third rejected review round, or the supervisor's verdict carries an `Escalation:` line), the architect evaluates the non-standard pattern and writes an architecture decision record (ADR) at `dev/adr/NNNN-<kebab-title>.md`.
+1. **Greenfield architecture and interface contracts.** Once, before code generation begins on a new system or subsystem: cross-boundary interface specs, API schemas, and high-level design (for example `<outputDir>/project_spec.md`).
+2. **Ambiguity and complex decision gate.** When an edge case or platform constraint stalls the supervisor and implementer loop (for example, a task hits its third rejected review round, or the supervisor's verdict carries an `Escalation:` line), the architect evaluates the non-standard pattern and writes an architecture decision record (ADR) at `<outputDir>/adr/NNNN-<kebab-title>.md`.
 3. **Cross-subsystem refactoring.** Macro-level refactors that span three or more interdependent modules. Single-module work and pull-request linting stay with the supervisor.
 
 **Threshold rule.** Before invoking the architect, the orchestrator states which gate applies and why the problem exceeds both the supervisor's and its own architectural threshold. If no gate applies, it does not invoke the architect.
@@ -59,6 +63,9 @@ The architect is idle unless one of these gates applies. Only the orchestrator d
 - `maxRunsPerDay`: cap on architect runs per UTC calendar day. `0` means no cap.
 - `outputDir`: repo-relative directory the architect may write into (default `dev`).
 - `runLog`: run log location. Absent means `<outputDir>/.architect-runs.log`; `"git"` means the git directory; any other value is a repo-relative path.
+- Counting: the PreToolUse hook counts a run when it allows the Agent call, before the user answers. A run the user declines, or one that fails, still uses up the cap. To undo it, remove that run's line from the run log.
+- Fork-point rule: `maxRunsPerBranch` counts only entries dated on or after the branch's fork point. The fork point is the committer date (UTC) of `git merge-base HEAD <base>`, where the base is the first of `origin/HEAD`, `main`, `master`, `origin/main`, or `origin/master` that exists. With no base, or on the base branch itself, every entry counts. Merging or rebasing the latest default branch into a live feature branch moves the fork point forward, so earlier runs on that branch stop counting. This is a soft cost guardrail. `maxRunsPerDay` is unaffected.
+- Merge-friendly log: the installer adds `<run log path> merge=union` to `.gitattributes`, so the committed run log merges cleanly between branches. It skips this when `runLog` is `"git"`, when the path is absolute, when it contains a `..` segment, or when it contains spaces or glob characters (`*`, `?`, `[`). It also skips when the path cannot be read from settings. Without `jq`, the installer assumes the default `dev/.architect-runs.log` path instead of the configured one. In a skipped case where the log is inside the repository, add the `merge=union` line yourself.
 
 **Output.** The architect writes only under `outputDir`. The orchestrator reviews the architect's output itself, commits it together with the run log (one commit per architect run), and then has the supervisor plan follow-up tasks from it.
 
@@ -89,7 +96,7 @@ Gate: <1 | 2 | 3> - <why this exceeds supervisor and orchestrator thresholds>
 Question: <the decision or design to produce>
 Inputs: <exact file paths to read: interfaces, specs, prior ADRs; keep it short>
 Constraints: <platform limits, non-goals, compatibility requirements>
-Output: <exact path under dev/, e.g. dev/adr/0003-surface-input-routing.md>
+Output: <exact path under <outputDir>/, e.g. <outputDir>/adr/0003-surface-input-routing.md>
 ```
 
 ## Architect report (architect → orchestrator)
@@ -120,3 +127,4 @@ After the findings, the verdict may include one `Escalation: <reason>` line. It 
 - A second PreToolUse hook, `.claude/hooks/agent-gate.sh`, routes models and gates the architect. It is registered in `.claude/settings.json` for the Agent tool and for the Write, Edit, and NotebookEdit tools.
 - Work on the session's feature branch. Never commit or push to `main` or `master`; merging is the user's decision. Open a pull request only when the user asks.
 - Environment reminders to commit (such as a Stop hook) do not override the review gate. Commit only approved work.
+- Upgrading: `install.sh --force` refreshes the framework files, but it never updates existing hook entries or `multiAgent` settings in `.claude/settings.json`, and it prints a note saying so. After an upgrade, compare `.claude/settings.json` with the installer's template by hand and add any missing hook entries or settings.
