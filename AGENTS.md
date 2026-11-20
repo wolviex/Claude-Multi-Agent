@@ -14,8 +14,8 @@ Every bookmarklet document has these sections, in this exact order, with these e
 1. `# <Bookmarklet title>`: the title line.
 2. `## Purpose`: prose describing what the bookmarklet does and when to use it.
 3. `## Requirements`: a bullet list of conditions it needs (site or page, browser, permissions).
-4. `## Copyable URL`: exactly one fenced code block with info string `text`, containing exactly one line.
-5. `## Readable code`: exactly one fenced code block with info string `js`.
+4. `## Copyable URL`: exactly one fenced code block with info string `text`, containing exactly one line. The section must contain exactly one fenced block of any kind; a second block, even one without an info string, fails.
+5. `## Readable code`: exactly one fenced code block with info string `js`. The section must contain exactly one fenced block of any kind; a second block, even one without an info string, fails.
 6. `## Notes`: optional; limitations and known issues.
 
 ## Copyable URL rules
@@ -31,7 +31,7 @@ Every bookmarklet document has these sections, in this exact order, with these e
 
 ## Code parity rules
 
-- The decoded copyable URL and the readable code must be the same program. Parse both with acorn (`ecmaVersion: "latest"`, script mode). Their ASTs must be identical after ignoring positions, `raw` text, and comments.
+- The decoded copyable URL and the readable code must be the same program. Parse both with acorn (`ecmaVersion: "latest"`, script mode). Their ASTs must be identical after ignoring positions, `raw` text, and comments, except that the `raw` text of tagged template literals (for example `String.raw`) is compared, because the tag can read it.
 - Workflow: edit the readable code first, then regenerate the URL from it. Never change logic in only one of the two.
 - The Purpose and Requirements text must keep matching what the code does.
 

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Ensure jq is installed
+        run: command -v jq || sudo apt-get install -y jq
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Parity checker self-test
+        run: npm test
+
+      - name: Installer tests
+        run: npm run test:install
+
+      - name: Agent gate tests
+        run: npm run test:agent-gate
+
+      - name: Git guard tests
+        run: npm run test:git-guard
+
+      - name: Shell syntax check
+        run: |
+          # bash -n checks only the first file it is given, so loop over every file.
+          for f in install.sh .claude/hooks/*.sh scripts/*.sh; do
+            bash -n "$f" || exit 1
+          done
